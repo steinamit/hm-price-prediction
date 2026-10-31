@@ -6,23 +6,88 @@ md = lambda s: cells.append(nbf.v4.new_markdown_cell(s.strip()))
 code = lambda s: cells.append(nbf.v4.new_code_cell(s.strip()))
 
 md("""
-# Predicting H&M product prices from attributes, text and images
+# Predicting Fashion Product Prices from Attributes, Text and Images
 
-**Question.** How well can a product's price be estimated *before it sells*, using only what is known at design time:
-its catalogue attributes, its product description, and its photo? And which of the three carries the most signal?
+**Authors:** Amit Stein, Tair Maimon
+**Data:** H&M Personalized Fashion Recommendations (Kaggle, 2022)
 
-**Data.** [H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations) (Kaggle):
-`articles.csv` (product catalogue), `transactions_train.csv` (31.8M purchases, prices are scaled by H&M) and the product images.
+---
 
-**Approach.**
-1. Build one price per product: the median transaction price, keeping products with enough sales for a stable estimate.
-2. Split train/test **by `product_code`**, so colour variants of the same product never sit on both sides.
-3. Compare, on the same test set: a category baseline, tabular models, text models, an image model, and a model that combines all three.
+## Abstract
 
-Metrics: MAPE (scale-free, since H&M prices are anonymised), MAE on the scaled price, and R² on log price.
+A retailer has to price a new product before it has sold a single unit. This project asks how much of a product's
+price can be recovered from what is known at design time: its catalogue attributes, its written description and its
+photo. We derive one price per product from 31.8 million H&M transactions, split products into train and test sets so
+that colour variants of the same item never appear on both sides, and compare five approaches on the same held-out
+products: a category baseline, attribute models, text models, an image model, and a model that combines all three.
+Results and their interpretation are in Sections 8 and 9.
+
+## Contents
+
+1. Research questions
+2. Data
+3. Setup
+4. Target: one price per product
+5. Sampling and train/test split
+6. Evaluation
+7. Models
+8. Results
+9. Discussion and limitations
+10. References
 """)
 
-md("## 1. Setup")
+md("""
+## 1. Research questions
+
+| | Question |
+|---|---|
+| **RQ1** | How accurately can a product's price be predicted from its catalogue attributes alone? |
+| **RQ2** | Does the product text (name and description) carry price information beyond the attributes? |
+| **RQ3** | Does the product photo carry price information beyond the attributes and the text? |
+| **RQ4** | Does combining all three sources improve on the best single source? |
+
+Every model is compared with a simple baseline, the median price of the product type, so that each gain is measured
+against what a merchandiser could do with a lookup table.
+""")
+
+md("""
+## 2. Data
+
+The data comes from the Kaggle competition
+[H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations).
+It is not redistributed with this notebook; it can be downloaded from Kaggle after accepting the competition rules.
+
+| File | Content | Role in this project |
+|---|---|---|
+| `transactions_train.csv` | 31.8M purchases, Sep 2018 to Sep 2020, with the price paid | target |
+| `articles.csv` | ~105K products with catalogue attributes and a free-text description | features |
+| `images/` | one photo per product, stored as `images/010/0108775015.jpg` | image features |
+
+**Catalogue attributes used as features**
+
+| Column | Meaning | Example |
+|---|---|---|
+| `product_type_name` | product type | Trousers, Sweater |
+| `product_group_name` | broad product group | Garment Upper body, Underwear |
+| `graphical_appearance_name` | pattern | Solid, Stripe |
+| `colour_group_name` | colour | Black, Light Blue |
+| `perceived_colour_value_name` / `perceived_colour_master_name` | colour tone and family | Dark / Blue |
+| `department_name` | department | Jersey Basic |
+| `index_name` / `index_group_name` | target customer segment | Ladieswear, Baby/Children |
+| `section_name` | section | Womens Everyday Basics |
+| `garment_group_name` | garment group | Knitwear, Jersey Basic |
+| `prod_name` + `detail_desc` | product name and description (text) | "Jersey top with narrow shoulder straps." |
+
+Prices in the dataset are scaled by H&M, so they are not in a real currency. This does not affect the comparison:
+all metrics below are either relative (MAPE) or computed on log price (R²).
+""")
+
+md("""
+## 3. Setup
+
+Paths and run settings. `N_PRODUCTS` controls the sample size, because reading product photos from Google Drive is
+the slowest step.
+""")
 code("""
 # Settings: change these to match your Drive layout
 DATA_DIR   = '/content/drive/MyDrive'          # folder with articles.csv and transactions_train.csv
@@ -55,7 +120,16 @@ np.random.seed(SEED)
 os.makedirs(OUT_DIR, exist_ok=True)
 """)
 
-md("## 2. One price per product")
+md("""
+## 4. Target: one price per product
+
+A product is sold many times, sometimes at a discount, so its price is defined as the **median** transaction price.
+The median is robust to the occasional sale or promotion. Products with fewer than `MIN_SALES` transactions are
+dropped, because a price estimated from one or two sales is unreliable.
+
+The model predicts **log(price)**. Prices are right-skewed, and on the log scale an error of 10% counts the same for a
+cheap sock and an expensive coat.
+""")
 code("""
 t0 = time.time()
 tx = pd.read_csv(os.path.join(DATA_DIR, 'transactions_train.csv'),
@@ -88,11 +162,16 @@ plt.show()
 """)
 
 md("""
-## 3. Sample and split
+## 5. Sampling and train/test split
 
-Images are read from Drive one by one, which is the slow step, so the comparison runs on a random sample of products
-(set by `N_PRODUCTS`). When images are on, only products that have a photo are kept, so every model is scored on exactly
-the same products.
+**Sample.** The comparison runs on a random sample of `N_PRODUCTS` products. When images are used, only products that
+have a photo are kept, so every model is scored on exactly the same products.
+
+**Split by product, not by row.** H&M sells the same item in several colours. Each colour is a separate `article_id`,
+but all colours share one `product_code` and usually one price. A random split would put the black and the white
+version of the same shirt on opposite sides, and the model would "predict" a price it has effectively already seen.
+We therefore split with `GroupShuffleSplit` on `product_code` (80% train, 20% test), and assert that no product code
+appears in both sets.
 """)
 code("""
 # index every product photo under IMAGE_ROOT (the images may be split across several folders)
@@ -131,7 +210,21 @@ assert not set(train.product_code) & set(test.product_code)
 print(f'train {len(train):,} products | test {len(test):,} products | no product_code in both')
 """)
 
-md("## 4. Models")
+md(r"""
+## 6. Evaluation
+
+All models are trained on the same training products and scored on the same test products.
+
+| Metric | Definition | Why |
+|---|---|---|
+| **MAPE** | $\frac{100}{n}\sum_i \frac{\lvert \hat{p}_i - p_i \rvert}{p_i}$ | average error in percent; unaffected by H&M's price scaling |
+| **MAE** | $\frac{1}{n}\sum_i \lvert \hat{p}_i - p_i \rvert$ (shown ×1000) | average error on the scaled price |
+| **R² (log)** | $1 - \frac{\sum (\log p_i - \log \hat{p}_i)^2}{\sum (\log p_i - \overline{\log p})^2}$ | share of price variation explained |
+
+Here $p_i$ is the product's median price and $\hat{p}_i = e^{\widehat{\log p_i}}$ the model's prediction.
+""")
+
+md("## 7. Models")
 code("""
 results, preds = {}, {}
 def score(name, log_pred):
@@ -145,14 +238,28 @@ def score(name, log_pred):
     print(f"{name:32s} MAPE {results[name]['MAPE_%']:5.1f}%   R2(log) {results[name]['R2_log']:.3f}")
 """)
 
-md("### 4.1 Baseline: median price of the product type")
+md("""
+### 7.1 Baseline: median price of the product type
+
+Each test product gets the median log price of its product type in the training set (the overall median for an unseen
+type). This is what a merchandiser could do with a lookup table, and every other model has to beat it to be useful.
+""")
 code("""
 type_med = train.groupby('product_type_name')['log_price'].median()
 base = test['product_type_name'].map(type_med).fillna(train['log_price'].median())
 score('Baseline (product type median)', base.values)
 """)
 
-md("### 4.2 Tabular: catalogue attributes")
+md("""
+### 7.2 Attributes (RQ1)
+
+Two models on the eleven catalogue attributes:
+
+- **Ridge regression on one-hot encoded attributes.** A linear model: each attribute value adds or subtracts a fixed
+  percentage from the price. Rare values (fewer than 5 products) are grouped together.
+- **LightGBM with native categorical features.** Gradient-boosted trees that can capture interactions, such as a
+  premium that applies to knitwear only in Ladieswear.
+""")
 code("""
 CAT = ['product_type_name', 'product_group_name', 'graphical_appearance_name', 'colour_group_name',
        'perceived_colour_value_name', 'perceived_colour_master_name', 'department_name', 'index_name',
@@ -173,7 +280,17 @@ gbm_tab = lgb.LGBMRegressor(**LGB).fit(as_cat(train), train['log_price'])
 score('Tabular · LightGBM', gbm_tab.predict(as_cat(test)))
 """)
 
-md("### 4.3 Text: product name and description")
+md("""
+### 7.3 Text (RQ2)
+
+The product name and description often name the material and the cut ("cashmere", "wool blend", "padded"), which
+the structured attributes do not record.
+
+- **TF-IDF + Ridge.** Word and two-word frequencies, weighted by how distinctive they are. Its coefficients show which
+  words push the predicted price up or down.
+- **Sentence embeddings + Ridge.** `all-MiniLM-L6-v2` turns each description into a 384-dimensional vector that
+  captures meaning rather than exact words.
+""")
 code("""
 txt = lambda f: (f['prod_name'] + '. ' + f['detail_desc']).str.lower()
 tfidf = TfidfVectorizer(ngram_range=(1, 2), min_df=3, max_features=50000, sublinear_tf=True)
@@ -196,7 +313,13 @@ if USE_TEXT_EMB:
     score('Text · MiniLM embeddings + Ridge', Ridge(alpha=1.0).fit(E_tr, train['log_price']).predict(E_te))
 """)
 
-md("### 4.4 Image: CLIP embedding of the product photo")
+md("""
+### 7.4 Image (RQ3)
+
+Each product photo is encoded with **CLIP ViT-B/32**, a model trained to match images with text, into a 512-dimensional
+vector, followed by Ridge regression. The photo can show what neither the attributes nor the text record: fabric
+texture, finish and overall look.
+""")
 code("""
 if USE_IMAGES:
     import torch
@@ -218,10 +341,10 @@ if USE_IMAGES:
 """)
 
 md("""
-### 4.5 Combined: attributes + text + image
+### 7.5 Combined (RQ4)
 
-LightGBM on the catalogue attributes plus compressed text and image embeddings (PCA, 32 dimensions each,
-fitted on train only).
+LightGBM on the catalogue attributes plus the text and image embeddings, each compressed to 32 dimensions with PCA.
+The PCA is fitted on the training set only, so no information from the test products leaks into the features.
 """)
 code("""
 def fused(frame, parts):
@@ -242,7 +365,11 @@ if parts_tr:
     score('Combined · LightGBM', gbm_all.predict(fused(test, parts_te)))
 """)
 
-md("## 5. Results")
+md("""
+## 8. Results
+
+### 8.1 All models on the same test products
+""")
 code("""
 res = pd.DataFrame(results).T.sort_values('MAPE_%')
 res.style.format({'MAPE_%': '{:.1f}', 'MAE_x1000': '{:.2f}', 'R2_log': '{:.3f}'})
@@ -252,11 +379,52 @@ ax = res['MAPE_%'].sort_values(ascending=False).plot.barh(figsize=(7, 3.5), colo
 ax.set_xlabel('MAPE on test products (%), lower is better'); ax.set_title('Price error by model')
 plt.tight_layout(); plt.savefig(os.path.join(OUT_DIR, 'mape_by_model.png'), dpi=150); plt.show()
 """)
+md("""
+### 8.2 Answers to the research questions
+
+Computed directly from the results above, so the text always matches the numbers.
+""")
+code("""
+def mape(name): return results[name]['MAPE_%'] if name in results else None
+def best_of(prefix):
+    names = [n for n in results if n.startswith(prefix)]
+    return min(names, key=mape) if names else None
+
+base_name = 'Baseline (product type median)'
+b = mape(base_name)
+lines = [f'Baseline (median price of the product type): MAPE {b:.1f}%.']
+for rq, prefix, label in [('RQ1', 'Tabular', 'using the attributes'), ('RQ2', 'Text', 'using the text'),
+                          ('RQ3', 'Image', 'using the photo'), ('RQ4', 'Combined', 'combining all three')]:
+    n = best_of(prefix)
+    if n is None:
+        lines.append(f'{rq}: not run in this session.')
+        continue
+    m = mape(n); d = b - m
+    vs = f'{abs(d):.1f} points {"better" if d > 0 else "worse"} than the baseline'
+    lines.append(f'{rq}: best model {label} is "{n}", MAPE {m:.1f}% ({vs}; R² on log price {results[n]["R2_log"]:.3f}).')
+singles = [best_of(p) for p in ('Tabular', 'Text', 'Image') if best_of(p)]
+top = min(singles, key=mape)
+lines.append(f'Strongest single source: "{top}".')
+if best_of('Combined'):
+    gain = mape(top) - mape(best_of('Combined'))
+    lines.append(f'Combining the sources is {abs(gain):.1f} MAPE points {"better" if gain > 0 else "worse"} than the strongest single source.')
+print('\\n'.join(lines))
+""")
+
+md("""
+### 8.3 Where the best model is wrong
+""")
 code("""
 best = res.index[0]
 err = test.assign(ape=np.abs(np.exp(preds[best]) - test['price']) / test['price'] * 100)
 (err.groupby('product_group_name')['ape'].agg(['median', 'size'])
     .query('size >= 30').sort_values('median').round(1).rename(columns={'median': 'median APE %', 'size': 'products'}))
+""")
+md("""
+### 8.4 What drives the prediction
+
+Share of the LightGBM model's total gain contributed by each attribute, with the text and image embedding dimensions
+grouped together.
 """)
 code("""
 model = gbm_all if parts_tr else gbm_tab
@@ -273,12 +441,38 @@ print(json.dumps(summary, indent=2))
 """)
 
 md("""
-## 6. Notes
+## 9. Discussion and limitations
 
-- Prices in this dataset are scaled by H&M, so absolute values are not in a real currency; MAPE and R² are unaffected.
-- A product's price is the median over its transactions, which smooths out discounts but does not remove them.
-- The split is by `product_code`. A random split would put colour variants of the same item in both train and test and
-  make every model look better than it is.
+**Reading the results.** The gap between the baseline and the attribute models (RQ1) shows how much of the price is
+explained by what kind of product it is and who it is for. The gaps between the attribute models and the text and image
+models (RQ2, RQ3) show how much extra information sits in the description and the photo. If the combined model (RQ4)
+improves only slightly on the best single source, the sources largely overlap: the description and the photo mostly
+repeat what the catalogue already says.
+
+**Limitations.**
+
+- **The target is a realised price, not a list price.** The median smooths out discounts but does not remove them;
+  products that were heavily promoted will look cheaper than their original price.
+- **Prices are scaled.** H&M anonymised prices with an unknown scaling factor, so absolute errors cannot be read in a
+  real currency. Relative metrics are unaffected.
+- **Sample.** Image embedding is the slow step, so the comparison runs on a sample of products rather than the full
+  catalogue. Results on the full catalogue may differ slightly.
+- **One split.** Results come from a single grouped train/test split. Repeating the split with different seeds would
+  give a range for each metric.
+- **Frozen encoders.** The text and image models are used as fixed feature extractors and are not fine-tuned on prices.
+
+**Next steps.** Repeat the evaluation over several seeds and report confidence intervals; fine-tune the image encoder
+on price; add time features (season, launch date) to separate a product's intrinsic price from the timing of its sales.
+
+## 10. References
+
+1. H&M Group. *H&M Personalized Fashion Recommendations* (dataset). Kaggle, 2022.
+   https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations
+2. Radford, A. et al. *Learning Transferable Visual Models From Natural Language Supervision* (CLIP). ICML, 2021.
+3. Reimers, N. and Gurevych, I. *Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks*. EMNLP, 2019.
+4. Wang, W. et al. *MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers*. NeurIPS, 2020.
+5. Ke, G. et al. *LightGBM: A Highly Efficient Gradient Boosting Decision Tree*. NeurIPS, 2017.
+6. Pedregosa, F. et al. *Scikit-learn: Machine Learning in Python*. JMLR 12, 2011.
 """)
 
 nb = nbf.v4.new_notebook(cells=cells)
